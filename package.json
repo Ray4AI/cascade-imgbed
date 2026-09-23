@@ -1,0 +1,14 @@
+{
+  "name": "cascade-imgbed",
+  "version": "1.0.0",
+  "description": "Paste-image cascade web UI that generates direct links + LLM-ready reference formats",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

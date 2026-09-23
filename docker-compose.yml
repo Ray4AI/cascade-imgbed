@@ -1,0 +1,29 @@
+services:
+  cascade-imgbed:
+    build: .
+    # image: ray4ai/cascade-imgbed:latest   # 如已推送镜像可改用此行
+    container_name: cascade-imgbed
+    ports:
+      - "3080:3080"
+    environment:
+      # 反代基础域名：生成直链用的外部域名；留空则按访问地址自动推导
+      BASE_URL: ""
+      # 访问密码：留空 = 开放模式（只保护管理界面/上传，直链永远公开）
+      PASSWORD: ""
+      # 保留时长（多久清理）：10m / 1h / 6h / 1d / 7d / 30d / never
+      RETENTION: "7d"
+      # 清理扫描间隔：1m / 5m / 15m / 1h
+      CLEAN_INTERVAL: "5m"
+      # 分类型上传大小上限（MB）：默认以设置页为准；如在 env 固定，设置页的修改会在重启后被覆盖
+      # MAX_IMAGE_MB: "20"
+      # MAX_TEXT_MB: "2"
+      # MAX_AUDIO_MB: "50"
+      # MAX_VIDEO_MB: "100"
+      # MAX_DOC_MB: "30"
+      # 访问续期：true 则每次直链被访问都重新计时
+      SLIDING_EXPIRY: "false"
+      # 下载/另存保留原文件名（false = 随机 id.ext）
+      KEEP_FILENAME: "true"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

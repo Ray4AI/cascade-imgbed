@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CascadeImg · 粘贴出直链</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%235b8cff'/%3E%3Cpath d='M16 7l8 14H8z' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="logo">▲</span> CascadeImg</div>
+  <div class="spacer"></div>
+  <label class="ctl">格式
+    <select id="globalFormat"></select>
+  </label>
+  <button id="copyAllBtn" class="btn">复制全部</button>
+  <button id="uploadBtn" class="btn primary">＋ 上传</button>
+  <button id="settingsBtn" class="btn">⚙ 设置</button>
+  <button id="authBtn" class="btn ghost">登录</button>
+</header>
+
+<main id="stream">
+  <div id="emptyState" class="empty">
+    <div class="empty-icon">📋</div>
+    <h2>把截图 / 文件 Ctrl+V 粘贴到这里</h2>
+    <p>支持图片（png/jpeg/gif/webp/bmp）、文本（txt/md/json/代码）、音频（mp3/flac/wav/m4a/ogg）、<br>小视频（mp4/webm/mov）、pdf/zip 等；纯文本粘贴会存为 .txt。也可以拖拽或点「＋ 上传」<br>每个文件生成直链 + 可自定义格式的引用文本，复制给大模型即可</p>
+  </div>
+</main>
+
+<div id="dropOverlay" class="drop-overlay hidden"><div>松开以上传图片</div></div>
+<input type="file" id="fileInput" multiple hidden>
+<div id="toast" class="toast hidden"></div>
+
+<!-- 设置抽屉 -->
+<aside id="settingsDrawer" class="drawer hidden">
+  <div class="drawer-head">
+    <h3>设置</h3>
+    <button id="closeSettings" class="btn ghost">✕</button>
+  </div>
+  <div class="drawer-body">
+
+    <section class="field-group">
+      <h4>链接</h4>
+      <label class="field">反代基础域名（BASE_URL）
+        <input id="s_baseUrl" type="text" placeholder="https://img.example.com">
+        <small>生成直链时使用的外部域名。留空则按访问地址自动推导（局域网测试可留空）。</small>
+      </label>
+    </section>
+
+    <section class="field-group">
+      <h4>清理</h4>
+      <label class="field">保留时长（多久清理）
+        <select id="s_retention">
+          <option value="10m">10 分钟</option>
+          <option value="1h">1 小时</option>
+          <option value="6h">6 小时</option>
+          <option value="1d">1 天</option>
+          <option value="7d">7 天</option>
+          <option value="30d">30 天</option>
+          <option value="never">永久保留</option>
+        </select>
+      </label>
+      <label class="field">清理扫描间隔
+        <select id="s_cleanInterval">
+          <option value="1m">1 分钟</option>
+          <option value="5m">5 分钟</option>
+          <option value="15m">15 分钟</option>
+          <option value="1h">1 小时</option>
+        </select>
+      </label>
+      <label class="check">
+        <input id="s_sliding" type="checkbox"> 访问续期（每次直链被访问则重新计时）
+      </label>
+    </section>
+
+    <section class="field-group">
+      <h4>上传（分类型大小上限，MB）</h4>
+      <div class="limit-grid">
+        <label class="limit-row">图片 <input id="s_limImage" type="number" min="0.1" step="0.1"></label>
+        <label class="limit-row">文本 <input id="s_limText" type="number" min="0.1" step="0.1"></label>
+        <label class="limit-row">音频 <input id="s_limAudio" type="number" min="0.1" step="0.1"></label>
+        <label class="limit-row">视频 <input id="s_limVideo" type="number" min="0.1" step="0.1"></label>
+        <label class="limit-row">其他 <input id="s_limDoc" type="number" min="0.1" step="0.1"></label>
+      </div>
+      <small>「其他」指 pdf / 压缩包等。纯文本粘贴同样受文本上限约束；类型以服务端魔数嗅探为准。</small>
+    </section>
+
+    <section class="field-group">
+      <h4>下载</h4>
+      <label class="check">
+        <input id="s_keepName" type="checkbox"> 下载 / 另存时保留原文件名
+      </label>
+      <small>关闭时使用随机文件名（id.ext）。卡片上的「⬇ 保存」按钮同样遵循此设置。</small>
+    </section>
+
+    <section class="field-group">
+      <h4>格式模板</h4>
+      <small class="hint">占位符：{url} {id} {filename} {ext} {size} {w} {h} {time}</small>
+      <div id="formatRows"></div>
+      <button id="addFormatBtn" class="btn small">＋ 添加模板</button>
+    </section>
+
+    <section class="field-group">
+      <h4>访问密码</h4>
+      <div id="pwState" class="pw-state">当前状态：未设置（开放模式）</div>
+      <label class="field">当前密码（修改 / 清除时必填）
+        <input id="s_pwCurrent" type="password" autocomplete="current-password">
+      </label>
+      <label class="field">新密码
+        <input id="s_pwNext" type="password" autocomplete="new-password" placeholder="至少 4 位">
+      </label>
+      <label class="field">确认新密码
+        <input id="s_pwConfirm" type="password" autocomplete="new-password">
+      </label>
+      <div class="btn-row">
+        <button id="setPwBtn" class="btn primary">✓ 设置 / 修改密码</button>
+        <button id="clearPwBtn" class="btn danger">清除密码</button>
+      </div>
+      <small>点上面的按钮立即生效（不用再点下方保存）。密码保护的是：查看历史、上传、改设置；图片直链本身公开（大模型取图需要），靠随机 ID 防护。</small>
+    </section>
+
+    <section class="field-group">
+      <h4>状态 / 危险操作</h4>
+      <div id="statsLine" class="hint">—</div>
+      <div class="btn-row">
+        <button id="purgeBtn" class="btn danger">清空全部图片</button>
+      </div>
+    </section>
+
+  </div>
+  <div class="drawer-foot">
+    <button id="saveSettings" class="btn primary grow">保存以上设置（域名 / 清理 / 模板等）</button>
+  </div>
+</aside>
+
+<!-- 登录弹窗 -->
+<div id="loginModal" class="modal hidden">
+  <div class="modal-box">
+    <h3>输入访问密码</h3>
+    <input id="loginPassword" type="password" placeholder="密码" autocomplete="current-password">
+    <div class="btn-row">
+      <button id="loginSubmit" class="btn primary">登录</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
