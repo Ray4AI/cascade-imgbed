@@ -1,9 +1,12 @@
 # CascadeImg
 
 垂直 cascade 网页直链箱：往页面里粘一张截图 / 文件（Ctrl+V / 拖拽 / 选择文件），立刻生成
-**直链 + 可自定义格式的引用文本**（如 `[image:http://…]`），一键复制喂给大模型。
+**直链 + 可自定义格式的引用文本**（如 `[image:http://…]`），粘贴后自动写入剪贴板，直接粘给大模型。
 
 - 零依赖 Node.js（无需 npm install），单容器交付
+- **界面**：左侧「最新」大卡（大图预览 + 引用格式一键复制）+ 右侧历史 cascade（直链行 / 格式行 / 倒计时），
+  点历史项可置顶到左侧；手机端自适应单列布局
+- **粘贴 / 上传后自动复制引用文本**（按当前格式模板渲染，可在设置里关闭）
 - **支持类型**：图片 png/jpeg/gif/webp/bmp、文本 txt/md/json/csv/yaml/各类代码、
   音频 mp3/flac/wav/m4a/aac/ogg、视频 mp4/webm/mov/mkv/avi/ogv、文档 pdf、压缩包 zip/7z/rar/gz/bz2
   （全部经魔数嗅探；纯文本粘贴会存为 `.txt`；SVG 与 html/xml 按 text/plain 下发防 XSS）
@@ -13,14 +16,28 @@
 
 ## 快速开始
 
-### Docker（推荐）
+### 方式一：直接运行镜像（任何装了 Docker 的机器）
 
 ```bash
-docker compose up -d --build
+docker run -d --name cascade-imgbed --restart unless-stopped \
+  -p 3080:3080 \
+  -v $PWD/cascade-data:/data \
+  -e PASSWORD=change-me \
+  -e BASE_URL=https://img.example.com \
+  ghcr.io/ray4ai/cascade-imgbed:latest
 # 打开 http://<主机IP>:3080
 ```
 
-数据持久化在 `./data`（图片 `data/images/`、元数据 `data/meta.json`、配置 `data/config.json`）。
+镜像多架构（linux/amd64 + linux/arm64），x86 服务器 / NAS / 树莓派均可直接拉取。
+
+### 方式二：docker compose（自定义构建）
+
+```bash
+docker compose up -d --build
+# 或用现成镜像：把 docker-compose.yml 里的 build: . 换成 image: ghcr.io/ray4ai/cascade-imgbed:latest
+```
+
+数据持久化在挂载卷（默认 `./data`）：图片 `images/`、元数据 `meta.json`、配置 `config.json`。
 
 ### 直接运行（Node ≥ 18）
 

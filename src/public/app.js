@@ -1,4 +1,6 @@
-/* CascadeImg frontend — vanilla JS, no build step. */
+/* CascadeImg frontend — vanilla JS, no build step.
+ * Layout: left hero (newest / focused item, big) + right cascade (history).
+ * After every successful upload the reference text is auto-copied to the clipboard. */
 'use strict';
 
 const $ = (s) => document.querySelector(s);
@@ -9,11 +11,16 @@ const el = (tag, cls, text) => {
   return n;
 };
 
+const LS_AUTOCOPY = 'ci.autoCopy';
+
 let cfg = null;          // /api/config payload
 let items = [];          // cascade items, newest first
 let formats = [];        // template list
 let authRequired = false;
 let loggedIn = true;
+let focusId = null;      // item shown in the left hero pane
+let globalFormatId = ''; // currently selected format template
+let autoCopy = localStorage.getItem(LS_AUTOCOPY) !== '0';
 
 // ------------------------------------------------------------------ boot
 
@@ -61,37 +68,79 @@ async function loadConfig() {
     cfg = { formats: [{ id: 'llm', name: 'LLM 引用', template: '[image:{url}]' }], defaultFormat: 'llm', retention: 'never' };
   }
   formats = cfg.formats || [];
-  renderFormatSelects();
+  if (!formats.some((f) => f.id === globalFormatId)) globalFormatId = '';
+  syncFormatSelects();
   fillSettingsForm();
 }
 
 async function loadImages() {
   const data = await api('/api/images?limit=200');
   items = data.items || [];
-  const stream = $('#stream');
-  stream.querySelectorAll('.card').forEach((c) => c.remove());
-  for (const it of items.slice().reverse()) stream.appendChild(createCard(it)); // reverse → newest on top
-  toggleEmpty();
+  focusId = items[0]?.id || null;
+  renderAll();
 }
 
-function toggleEmpty() {
-  $('#emptyState').style.display = items.length ? 'none' : '';
+function renderAll() {
+  const focused = items.find((x) => x.id === focusId) || items[0] || null;
+  focusId = focused ? focused.id : null;
+
+  const slot = $('#heroSlot');
+  slot.innerHTML = '';
+  $('#emptyState').style.display = focused ? 'none' : '';
+  $('#heroHint').style.display = focused ? 'none' : '';
+  if (focused) slot.appendChild(buildHero(focused));
+
+  const list = $('#cascadeList');
+  list.innerHTML = '';
+  for (const it of items) {
+    if (it.id === focusId) continue;
+    list.appendChild(createMini(it));
+  }
+  const rest = items.length - (focused ? 1 : 0);
+  $('#sideCount').textContent = `${rest} 项`;
+  $('#sideEmpty').style.display = rest ? 'none' : '';
+  tickCountdowns();
+}
+
+function focusItem(id) {
+  if (focusId === id) return;
+  focusId = id;
+  renderAll();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // --------------------------------------------------------------- upload
 
+/** Upload a batch (paste / drop / picker). One auto-copy of all references when done. */
+async function handleFiles(files) {
+  const list = (files || []).filter(Boolean);
+  if (!list.length) return;
+  const results = await Promise.all(list.map(uploadFile));
+  const okItems = results.filter(Boolean);
+  if (!okItems.length) return;
+  if (!autoCopy) return;
+  const text = okItems.map((it) => buildOutput(it, currentFormatId())).join('\n');
+  const ok = await copyToClipboard(text);
+  if (ok) {
+    toast(okItems.length > 1 ? `已自动复制 ${okItems.length} 条引用 ✓` : '已自动复制引用 ✓', false, 'ok');
+  } else {
+    toast('自动复制被浏览器拦截，点「复制引用」按钮手动复制', true);
+    pulsePrimaryCopy();
+  }
+}
+
 async function uploadFile(file) {
-  if (!file) return;
+  if (!file) return null;
   // client-side pre-check against per-kind limits (server re-validates after sniffing)
   const kind = guessKind(file);
   const lim = (cfg.sizeLimitsMb || {})[kind];
   if (lim && file.size > lim * 1048576) {
     toast(`${KIND_LABEL[kind] || '文件'}类上限 ${lim} MB，当前 ${(file.size / 1048576).toFixed(1)} MB`, true);
-    return;
+    return null;
   }
-  const card = createPendingCard(file);
-  $('#stream').prepend(card);
-  toggleEmpty();
+  const pending = createPendingCard(file);
+  $('#cascadeList').prepend(pending);
+  $('#sideEmpty').style.display = 'none';
   try {
     const res = await fetch('/api/upload', {
       method: 'POST',
@@ -103,24 +152,27 @@ async function uploadFile(file) {
       body: file,
     });
     const data = await res.json().catch(() => ({}));
-    if (res.status === 401) { card.remove(); showLogin(); return; }
+    if (res.status === 401) { pending.remove(); showLogin(); return null; }
     if (!res.ok) throw new Error(data.error || res.statusText);
-    card.replaceWith(createCard(data));
+    pending.remove();
     items.unshift(data);
-    toggleEmpty();
+    focusId = data.id; // newest → left hero
+    renderAll();
+    return data;
   } catch (e) {
-    card.remove();
-    toggleEmpty();
+    pending.remove();
+    renderAll();
     toast('上传失败: ' + e.message, true);
+    return null;
   }
 }
 
 // ---------------------------------------------------------------- cards
 
 function createPendingCard(file) {
-  const card = el('article', 'card pending');
-  const thumb = el('div', 'thumb');
-  if (file.type.startsWith('image/')) {
+  const card = el('article', 'mini-card pending');
+  const thumb = el('div', 'mini-thumb');
+  if ((file.type || '').startsWith('image/')) {
     const img = el('img');
     img.alt = '';
     try { img.src = URL.createObjectURL(file); } catch { /* ignore */ }
@@ -128,8 +180,9 @@ function createPendingCard(file) {
   } else {
     thumb.appendChild(el('div', 'kind-icon', kindIcon(file.type, file.name)));
   }
-  const body = el('div', 'body');
-  body.appendChild(el('div', 'meta', `正在上传 ${file.name || '文件'}…`));
+  const body = el('div', 'mini-body');
+  body.appendChild(el('div', 'mini-name', file.name || '粘贴内容'));
+  body.appendChild(el('div', 'mini-meta', '正在上传…'));
   card.append(thumb, body);
   return card;
 }
@@ -157,15 +210,153 @@ function guessKind(file) {
   return 'doc';
 }
 
-function createCard(it) {
-  const card = el('article', 'card');
+function kindBadge(it) {
+  return el('span', 'badge', KIND_LABEL[it.kind] || '文件');
+}
+
+function openUrl(url) {
+  window.open(url, '_blank', 'noopener');
+}
+
+// ---- hero (left, focused item) ----
+
+function buildHero(it) {
+  const card = el('article', 'hero-card');
   card.dataset.id = it.id;
 
-  const thumb = el('div', 'thumb');
+  const media = el('div', 'hero-media');
   if (it.kind === 'image') {
     const img = el('img');
     img.src = it.url;
     img.alt = it.filename || it.id;
+    img.loading = 'eager';
+    media.appendChild(img);
+    media.onclick = () => openUrl(it.url);
+  } else if (it.kind === 'video') {
+    const v = el('video');
+    v.src = it.url;
+    v.controls = true;
+    v.preload = 'metadata';
+    v.playsInline = true;
+    media.appendChild(v);
+    media.style.cursor = 'default';
+  } else if (it.kind === 'text') {
+    const pre = el('pre', 'preview');
+    pre.textContent = '加载预览…';
+    media.appendChild(pre);
+    media.style.cursor = 'text';
+    loadTextPreview(it, pre, 200);
+  } else {
+    media.appendChild(el('div', 'kind-icon', kindIcon(it.mime, it.filename)));
+    media.onclick = () => openUrl(it.url);
+  }
+  card.appendChild(media);
+
+  // title + meta
+  const title = el('div', 'hero-title');
+  title.appendChild(kindBadge(it));
+  title.appendChild(el('div', 'name', it.filename || `${it.id}.${it.ext}`));
+  card.appendChild(title);
+
+  const sub = el('div', 'hero-sub');
+  const dims = it.w && it.h ? `${it.w}×${it.h}` : '';
+  const when = it.createdAt ? new Date(it.createdAt).toLocaleString() : '';
+  sub.appendChild(el('span', '', [dims, it.sizeLabel, when].filter(Boolean).join(' · ')));
+  const ttl = el('span', 'ttl');
+  ttl.dataset.expire = String(it.expireAt || 0);
+  sub.appendChild(ttl);
+  if (it.hits) sub.appendChild(el('span', '', `直链被访问 ${it.hits} 次`));
+  card.appendChild(sub);
+
+  // actions
+  const actions = el('div', 'hero-actions');
+  const dl = el('button', 'btn', '⬇ 保存');
+  dl.title = '下载并保留原文件名';
+  dl.onclick = () => downloadItem(it);
+  const copyUrl = el('button', 'btn', '🔗 复制直链');
+  copyUrl.onclick = () => copyWithBtn(it.url, copyUrl);
+  const open = el('button', 'btn', '↗ 打开');
+  open.onclick = () => openUrl(it.url);
+  const del = el('button', 'btn danger', '删除');
+  del.onclick = () => deleteImage(it, card);
+  actions.append(dl, copyUrl, open, del);
+  card.appendChild(actions);
+
+  // citation block — big & prominent, the thing you actually paste to an LLM
+  const cite = el('div', 'cite');
+  const head = el('div', 'cite-head');
+  head.appendChild(el('span', 'cite-label', '引用格式'));
+  const fmtSelect = el('select', 'fmt-select');
+  fillFormatSelect(fmtSelect, currentFormatId());
+  head.appendChild(fmtSelect);
+  cite.appendChild(head);
+
+  const area = el('textarea', 'cite-text');
+  area.readOnly = true;
+  area.value = buildOutput(it, fmtSelect.value);
+  area.onfocus = () => area.select();
+  fmtSelect.onchange = () => setGlobalFormat(fmtSelect.value);
+  cite.appendChild(area);
+
+  const copyBtn = el('button', 'btn primary btn-copy-primary', '复制引用');
+  copyBtn.id = 'heroCopyBtn';
+  copyBtn.onclick = async () => {
+    const ok = await copyToClipboard(buildOutput(it, fmtSelect.value));
+    btnFlash(copyBtn, ok);
+  };
+  cite.appendChild(copyBtn);
+  card.appendChild(cite);
+
+  // direct link row
+  card.appendChild(buildRow('直链', it.url, () => it.url, null));
+  return card;
+}
+
+function refreshOutputs() {
+  const cur = currentFormatId();
+  // hero card
+  const heroCard = $('#heroSlot .hero-card');
+  if (heroCard) {
+    const it = items.find((x) => x.id === heroCard.dataset.id);
+    const area = heroCard.querySelector('.cite-text');
+    const sel = heroCard.querySelector('.fmt-select');
+    if (it && area && sel) {
+      if (sel.value !== cur) sel.value = cur;
+      area.value = buildOutput(it, sel.value);
+    }
+  }
+  // history cards (per-card select follows the global one)
+  document.querySelectorAll('.mini-card[data-id]').forEach((card) => {
+    const it = items.find((x) => x.id === card.dataset.id);
+    if (!it) return;
+    const sel = card.querySelector('.fmt-select');
+    const input = card.querySelector('.row-input');
+    if (sel && sel.value !== cur) sel.value = cur;
+    if (input) input.value = buildOutput(it, sel ? sel.value : cur);
+  });
+}
+
+function pulsePrimaryCopy() {
+  const btn = $('#heroCopyBtn');
+  if (!btn) return;
+  btn.classList.remove('pulse');
+  void btn.offsetWidth; // restart animation
+  btn.classList.add('pulse');
+}
+
+// ---- history card (right cascade, original-density cascade rows) ----
+
+function createMini(it) {
+  const card = el('article', 'mini-card');
+  card.dataset.id = it.id;
+  card.title = '点击置顶到左侧';
+
+  const thumb = el('div', 'mini-thumb');
+  if (it.kind === 'image') {
+    const img = el('img');
+    img.src = it.url;
+    img.alt = '';
+    img.loading = 'lazy';
     thumb.appendChild(img);
   } else if (it.kind === 'video') {
     const v = el('video');
@@ -178,59 +369,63 @@ function createCard(it) {
     thumb.appendChild(el('div', 'kind-icon', kindIcon(it.mime, it.filename)));
   }
 
-  const body = el('div', 'body');
+  const body = el('div', 'mini-body');
 
-  // meta line
-  const meta = el('div', 'meta');
+  // meta line (same density as the old cascade cards)
+  const meta = el('div', 'mini-meta');
   const dims = it.w && it.h ? `${it.w}×${it.h}` : '';
-  if (it.kind !== 'image') meta.appendChild(el('span', 'badge', KIND_LABEL[it.kind] || '文件'));
-  meta.appendChild(el('span', 'name', it.filename || `${it.id}.${it.ext}`));
+  if (it.kind !== 'image') meta.appendChild(kindBadge(it));
+  meta.appendChild(el('div', 'mini-name', it.filename || `${it.id}.${it.ext}`));
   meta.appendChild(el('span', 'muted', [dims, it.sizeLabel].filter(Boolean).join(' · ')));
   const ttl = el('span', 'ttl');
   ttl.dataset.expire = String(it.expireAt || 0);
   meta.appendChild(ttl);
   const dl = el('button', 'btn tiny', '⬇ 保存');
   dl.title = '下载并保留原文件名';
-  dl.onclick = () => downloadItem(it);
+  dl.onclick = (e) => { e.stopPropagation(); downloadItem(it); };
   meta.appendChild(dl);
   const del = el('button', 'btn tiny danger', '删除');
-  del.onclick = () => deleteImage(it, card);
+  del.onclick = (e) => { e.stopPropagation(); deleteImage(it, card); };
   meta.appendChild(del);
   body.appendChild(meta);
 
   // direct link row
   body.appendChild(buildRow('直链', it.url, () => it.url, null));
 
-  // formatted output row
+  // formatted output row (card-level format selector)
   const fmtSelect = el('select', 'fmt-select');
-  for (const f of formats) {
-    const opt = el('option', '', f.name || f.id);
-    opt.value = f.id;
-    fmtSelect.appendChild(opt);
-  }
-  fmtSelect.value = it.defaultFormat || cfg.defaultFormat || formats[0]?.id;
+  fillFormatSelect(fmtSelect, currentFormatId());
   const outInput = buildRow('格式', buildOutput(it, fmtSelect.value), () => buildOutput(it, fmtSelect.value), fmtSelect);
-  fmtSelect.onchange = () => {
+  fmtSelect.onchange = (e) => {
+    e.stopPropagation();
     outInput.querySelector('input').value = buildOutput(it, fmtSelect.value);
   };
   body.appendChild(outInput);
 
+  if (it.kind === 'text') {
+    const pre = el('pre', 'preview');
+    body.appendChild(pre);
+    loadTextPreview(it, pre, 6);
+  }
+
   card.append(thumb, body);
-  tickCountdown(ttl);
-  if (it.kind === 'text') loadTextPreview(it, body);
+  card.onclick = (e) => {
+    if (e.target.closest('input, select, button, textarea, a')) return;
+    focusItem(it.id);
+  };
   return card;
 }
 
-async function loadTextPreview(it, body) {
-  if ((it.size || 0) > 200 * 1024) return; // skip huge texts
+async function loadTextPreview(it, pre, maxLines) {
+  if ((it.size || 0) > 200 * 1024) { pre.textContent = '（文件过大，跳过预览）'; return; }
   try {
     const res = await fetch(it.url);
     const text = (await res.text()).trim();
-    if (!text) return;
-    const pre = el('pre', 'preview');
-    pre.textContent = text.split('\n').slice(0, 6).join('\n').slice(0, 500);
-    body.appendChild(pre);
-  } catch { /* preview is optional */ }
+    if (!text) { pre.textContent = '（空文件）'; return; }
+    pre.textContent = text.split('\n').slice(0, maxLines || 6).join('\n').slice(0, 2000);
+  } catch {
+    pre.textContent = '（预览不可用）';
+  }
 }
 
 function buildRow(labelText, value, refresh, extraControl) {
@@ -238,17 +433,18 @@ function buildRow(labelText, value, refresh, extraControl) {
   const label = el('label', 'row-label', labelText);
   if (extraControl) label.appendChild(extraControl);
   const input = el('input');
+  input.className = 'row-input';
   input.readOnly = true;
   input.value = value;
   input.onfocus = () => input.select();
   const copy = el('button', 'btn tiny', '复制');
-  copy.onclick = () => copyText(refresh ? refresh() : input.value, copy);
+  copy.onclick = () => copyWithBtn(refresh ? refresh() : input.value, copy);
   row.append(label, input, copy);
   return row;
 }
 
 function buildOutput(it, fmtId) {
-  const id = fmtId || cfg.defaultFormat || formats[0]?.id;
+  const id = fmtId || currentFormatId();
   return (it.formats && it.formats[id]) || it.url;
 }
 
@@ -256,10 +452,11 @@ async function deleteImage(it, card) {
   try {
     await api(`/api/images/${it.id}`, { method: 'DELETE' });
     items = items.filter((x) => x.id !== it.id);
-    card.remove();
-    toggleEmpty();
+    if (focusId === it.id) focusId = items[0]?.id || null;
+    renderAll();
   } catch (e) {
     toast('删除失败: ' + e.message, true);
+    card?.remove?.();
   }
 }
 
@@ -296,30 +493,38 @@ function remainLabel(exp) {
 
 // ------------------------------------------------------------- formats UI
 
-function renderFormatSelects() {
-  const sel = $('#globalFormat');
+function currentFormatId() {
+  if (globalFormatId && formats.some((f) => f.id === globalFormatId)) return globalFormatId;
+  return cfg?.defaultFormat || formats[0]?.id;
+}
+
+function setGlobalFormat(id) {
+  globalFormatId = id;
+  syncFormatSelects();
+  refreshOutputs();
+}
+
+function fillFormatSelect(sel, value) {
   sel.innerHTML = '';
   for (const f of formats) {
     const opt = el('option', '', f.name || f.id);
     opt.value = f.id;
     sel.appendChild(opt);
   }
-  sel.value = cfg.defaultFormat || formats[0]?.id || '';
-  document.querySelectorAll('.card .fmt-select').forEach((s) => {
-    const cur = s.value;
-    s.innerHTML = '';
-    for (const f of formats) {
-      const opt = el('option', '', f.name || f.id);
-      opt.value = f.id;
-      s.appendChild(opt);
-    }
-    if (formats.some((f) => f.id === cur)) s.value = cur;
-  });
+  if (value) sel.value = value;
+}
+
+function syncFormatSelects() {
+  const cur = currentFormatId();
+  fillFormatSelect($('#globalFormat'), cur);
+  const heroSel = $('#heroSlot .fmt-select');
+  if (heroSel) fillFormatSelect(heroSel, cur);
 }
 
 // ------------------------------------------------------------- settings UI
 
 function fillSettingsForm() {
+  $('#s_autoCopy').checked = autoCopy;
   $('#s_baseUrl').value = cfg.baseUrl || '';
   $('#s_retention').value = cfg.retention || '7d';
   $('#s_cleanInterval').value = cfg.cleanInterval || '5m';
@@ -330,7 +535,7 @@ function fillSettingsForm() {
   const st = cfg.stats || {};
   const bytes = st.bytes ? (st.bytes / 1024 / 1024).toFixed(2) + ' MB' : '0 B';
   const swept = st.lastSweep?.at ? new Date(st.lastSweep.at).toLocaleTimeString() : '—';
-  $('#statsLine').textContent = `图片 ${st.count || 0} 张，共 ${bytes} · 上次清理: ${swept}`;
+  $('#statsLine').textContent = `文件 ${st.count || 0} 个，共 ${bytes} · 上次清理: ${swept}`;
   renderPwState();
   renderFormatRows();
 }
@@ -386,6 +591,9 @@ function collectFormats() {
 }
 
 async function saveSettings() {
+  autoCopy = $('#s_autoCopy').checked;
+  localStorage.setItem(LS_AUTOCOPY, autoCopy ? '1' : '0');
+
   const { formats: fmts, defaultFormat } = collectFormats();
   const payload = {
     baseUrl: $('#s_baseUrl').value.trim(),
@@ -405,21 +613,10 @@ async function saveSettings() {
   try {
     cfg = await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) });
     formats = cfg.formats;
-    renderFormatSelects();
+    for (const it of items) it.formats = (await reRenderFormats(it)) || it.formats;
+    syncFormatSelects();
     fillSettingsForm();
-    // re-render card outputs with new templates
-    for (const it of items) {
-      it.formats = (await reRenderFormats(it)) || it.formats;
-    }
-    document.querySelectorAll('.card').forEach((card) => {
-      const it = items.find((x) => x.id === card.dataset.id);
-      if (!it) return;
-      const sel = card.querySelector('.fmt-select');
-      const input = card.querySelectorAll('.row')[1]?.querySelector('input');
-      if (sel && input) input.value = buildOutput(it, sel.value);
-      const urlInput = card.querySelectorAll('.row')[0]?.querySelector('input');
-      if (urlInput) urlInput.value = it.url;
-    });
+    renderAll();
     toast('设置已保存');
   } catch (e) {
     toast('保存失败: ' + e.message, true);
@@ -539,30 +736,52 @@ async function doLogout() {
 
 // -------------------------------------------------------------- clipboard
 
-async function copyText(text, btn) {
+/** Write text to the clipboard. Works on plain http too (execCommand fallback).
+ *  Resolves true on success. */
+async function copyToClipboard(text) {
   try {
-    await navigator.clipboard.writeText(text);
-  } catch {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through */ }
+  try {
     const ta = el('textarea');
     ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:-9999px;opacity:0';
     document.body.appendChild(ta);
     ta.select();
-    document.execCommand('copy');
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand('copy');
     ta.remove();
-  }
-  if (btn) {
-    const old = btn.textContent;
-    btn.textContent = '已复制 ✓';
-    setTimeout(() => { btn.textContent = old; }, 1200);
+    return ok;
+  } catch {
+    return false;
   }
 }
 
+function btnFlash(btn, ok) {
+  const old = btn.textContent;
+  btn.textContent = ok ? '已复制 ✓' : '复制失败';
+  btn.classList.toggle('err', !ok);
+  setTimeout(() => {
+    btn.textContent = old;
+    btn.classList.remove('err');
+  }, 1200);
+}
+
+async function copyWithBtn(text, btn) {
+  const ok = await copyToClipboard(text);
+  if (btn) btnFlash(btn, ok);
+  if (!ok) toast('复制失败，请手动选中文本复制', true);
+}
+
 function copyAll() {
-  const sel = $('#globalFormat').value;
+  const sel = currentFormatId();
   const lines = items.slice().reverse().map((it) => buildOutput(it, sel)); // 旧 → 新
-  if (!lines.length) return toast('还没有图片', true);
-  copyText(lines.join('\n'));
-  toast(`已复制 ${lines.length} 条`);
+  if (!lines.length) return toast('还没有文件', true);
+  copyWithBtn(lines.join('\n'), null).then(() => toast(`已复制 ${lines.length} 条`));
 }
 
 // ---------------------------------------------------------------- events
@@ -579,7 +798,7 @@ function bindGlobalEvents() {
     }
     if (files.length) {
       e.preventDefault();
-      files.forEach(uploadFile);
+      handleFiles(files);
       return;
     }
     // plain-text paste (outside inputs) → temp .txt entry, like a pastebin
@@ -588,7 +807,7 @@ function bindGlobalEvents() {
     if (text.trim() && tag !== 'INPUT' && tag !== 'TEXTAREA') {
       e.preventDefault();
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-      uploadFile(new File([text], `pasted-${stamp}.txt`, { type: 'text/plain' }));
+      handleFiles([new File([text], `pasted-${stamp}.txt`, { type: 'text/plain' })]);
     }
   });
 
@@ -607,14 +826,14 @@ function bindGlobalEvents() {
     e.preventDefault();
     dragDepth = 0;
     $('#dropOverlay').classList.add('hidden');
-    for (const f of e.dataTransfer?.files || []) uploadFile(f);
+    handleFiles([...(e.dataTransfer?.files || [])]);
   });
 
   // buttons
   $('#uploadBtn').onclick = () => $('#fileInput').click();
   $('#emptyState').onclick = () => $('#fileInput').click();
   $('#fileInput').onchange = (e) => {
-    [...e.target.files].forEach(uploadFile);
+    handleFiles([...e.target.files]);
     e.target.value = '';
   };
   $('#copyAllBtn').onclick = copyAll;
@@ -626,18 +845,22 @@ function bindGlobalEvents() {
   $('#saveSettings').onclick = saveSettings;
   $('#setPwBtn').onclick = setPassword;
   $('#clearPwBtn').onclick = clearPassword;
+  $('#s_autoCopy').onchange = () => {
+    autoCopy = $('#s_autoCopy').checked;
+    localStorage.setItem(LS_AUTOCOPY, autoCopy ? '1' : '0');
+  };
   $('#addFormatBtn').onclick = () => {
     const id = 'custom' + Date.now().toString(36);
     formats.push({ id, name: '自定义', template: '[image:{url}]' });
     renderFormatRows();
   };
   $('#purgeBtn').onclick = async () => {
-    if (!confirm('确定清空全部图片？此操作不可恢复')) return;
+    if (!confirm('确定清空全部文件？此操作不可恢复')) return;
     try {
       await api('/api/purge', { method: 'POST' });
       items = [];
-      document.querySelectorAll('.card').forEach((c) => c.remove());
-      toggleEmpty();
+      focusId = null;
+      renderAll();
       toast('已清空');
     } catch (e) {
       toast(e.message, true);
@@ -646,24 +869,17 @@ function bindGlobalEvents() {
   $('#authBtn').onclick = () => (loggedIn ? doLogout() : showLogin());
   $('#loginSubmit').onclick = doLogin;
   $('#loginPassword').addEventListener('keydown', (e) => e.key === 'Enter' && doLogin());
-  $('#globalFormat').onchange = () => {
-    document.querySelectorAll('.card').forEach((card) => {
-      const sel = card.querySelector('.fmt-select');
-      if (sel) {
-        sel.value = $('#globalFormat').value;
-        sel.onchange();
-      }
-    });
-  };
+  $('#globalFormat').onchange = () => setGlobalFormat($('#globalFormat').value);
 }
 
 // ------------------------------------------------------------------ toast
 
 let toastTimer = null;
-function toast(msg, isErr = false) {
+function toast(msg, isErr = false, kind = '') {
   const t = $('#toast');
   t.textContent = msg;
-  t.classList.toggle('err', isErr);
+  t.classList.toggle('err', !!isErr);
+  t.classList.toggle('ok', !isErr && kind === 'ok');
   t.classList.remove('hidden');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.add('hidden'), 2600);
